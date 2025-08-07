@@ -24,6 +24,45 @@ def compute_euclidean_distance_matrix(loc_dict):
     return matrix, keys
 
 distance_matrix, location_order = compute_euclidean_distance_matrix(locations)
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+
+# คำนวณระยะทาง
+distance_matrix = compute_euclidean_distance_matrix(locations)
+
+# สร้าง routing model
+manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)  # 1 vehicle, starts at index 0 (DIT)
+routing = pywrapcp.RoutingModel(manager)
+
+# สร้างฟังก์ชันระยะทาง
+def distance_callback(from_index, to_index):
+    from_node = manager.IndexToNode(from_index)
+    to_node = manager.IndexToNode(to_index)
+    return int(distance_matrix[from_node][to_node])
+
+transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+# สร้าง parameter
+search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+search_parameters.first_solution_strategy = (
+    routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
+
+# แก้ปัญหา
+solution = routing.SolveWithParameters(search_parameters)
+
+# แสดงผล
+if solution:
+    index = routing.Start(0)
+    route = []
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        route.append(list(locations.keys())[node])
+        index = solution.Value(routing.NextVar(index))
+    route.append(list(locations.keys())[manager.IndexToNode(index)])
+    print("เส้นทางที่ดีที่สุด:", " -> ".join(route))
+else:
+    print("ไม่พบเส้นทางที่เหมาะสม")
 
 # สร้างโมเดล
 manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)  # 1 รถ, เริ่มที่จุด 0
