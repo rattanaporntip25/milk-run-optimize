@@ -1,9 +1,16 @@
-
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
+import streamlit as st
 import numpy as np
+import folium
+from streamlit_folium import st_folium
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-# ข้อมูลเวนเดอร์ (รวม DIT)
+st.set_page_config(page_title="Milk Run Optimizer", layout="wide")
+st.title("Milk Run Optimizer")
+st.markdown("🚛 คำนวณเส้นทางขนส่งที่สั้นที่สุดด้วย Google OR-Tools")
+
+# -----------------------------
+# ข้อมูลจุด (DIT และเวนเดอร์)
+# -----------------------------
 locations = {
     "DIT": (13.4214, 101.0101),
     "VND1": (13.5000, 100.9000),
@@ -11,94 +18,70 @@ locations = {
     "VND3": (13.4500, 100.8000),
 }
 
-# คำนวณระยะทางระหว่างทุกคู่
-def compute_euclidean_distance_matrix(loc_dict):
+# -----------------------------
+# สร้าง Distance Matrix
+# -----------------------------
+def compute_distance_matrix(loc_dict):
     keys = list(loc_dict.keys())
     size = len(keys)
     matrix = np.zeros((size, size))
     for i in range(size):
         for j in range(size):
-            xi, yi = loc_dict[keys[i]]
-            xj, yj = loc_dict[keys[j]]
-            matrix[i][j] = np.sqrt((xi - xj) ** 2 + (yi - yj) ** 2)
+            if i != j:
+                lat1, lon1 = loc_dict[keys[i]]
+                lat2, lon2 = loc_dict[keys[j]]
+                matrix[i][j] = np.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2)
     return matrix, keys
 
-distance_matrix, location_order = compute_euclidean_distance_matrix(locations)
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
+distance_matrix, location_keys = compute_distance_matrix(locations)
 
-# คำนวณระยะทาง
-distance_matrix = compute_euclidean_distance_matrix(locations)
-
-# สร้าง routing model
-manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)  # 1 vehicle, starts at index 0 (DIT)
+# -----------------------------
+# ใช้ OR-Tools หาเส้นทาง
+# -----------------------------
+manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)
 routing = pywrapcp.RoutingModel(manager)
 
-# สร้างฟังก์ชันระยะทาง
-def distance_callback(from_index, to_index):
-    from_node = manager.IndexToNode(from_index)
-    to_node = manager.IndexToNode(to_index)
-    return int(distance_matrix[from_node][to_node])
+def distance_callback(from_idx, to_idx):
+    from_node = manager.IndexToNode(from_idx)
+    to_node = manager.IndexToNode(to_idx)
+    return int(distance_matrix[from_node][to_node] * 100000)  # scale
 
-transit_callback_index = routing.RegisterTransitCallback(distance_callback)
-routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+transit_index = routing.RegisterTransitCallback(distance_callback)
+routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
 
-# สร้าง parameter
-search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-search_parameters.first_solution_strategy = (
-    routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
+params = pywrapcp.DefaultRoutingSearchParameters()
+params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
 
-# แก้ปัญหา
-solution = routing.SolveWithParameters(search_parameters)
+solution = routing.SolveWithParameters(params)
 
-# แสดงผล
+# -----------------------------
+# แสดงผลลัพธ์บน Streamlit
+# -----------------------------
 if solution:
-    index = routing.Start(0)
-    route = []
-    while not routing.IsEnd(index):
-        node = manager.IndexToNode(index)
-        route.append(list(locations.keys())[node])
-        index = solution.Value(routing.NextVar(index))
-    route.append(list(locations.keys())[manager.IndexToNode(index)])
-    print("เส้นทางที่ดีที่สุด:", " -> ".join(route))
+    route_idx = routing.Start(0)
+    optimized_route = []
+    while not routing.IsEnd(route_idx):
+        node_index = manager.IndexToNode(route_idx)
+        optimized_route.append(location_keys[node_index])
+        route_idx = solution.Value(routing.NextVar(route_idx))
+    optimized_route.append(location_keys[manager.IndexToNode(route_idx)])
+
+    st.success("✔️ เส้นทางที่สั้นที่สุด:")
+    st.write(" ➜ ".join(optimized_route))
+
+    # แสดงแผนที่
+    route_map = folium.Map(location=locations["DIT"], zoom_start=9)
+    coords = [locations[loc] for loc in optimized_route]
+
+    for i, loc in enumerate(optimized_route):
+        lat, lng = locations[loc]
+        icon_color = "blue" if loc != "DIT" else "green"
+        popup = f"{i+1}. {loc}"
+        folium.Marker(location=(lat, lng), popup=popup,
+                      icon=folium.Icon(color=icon_color)).add_to(route_map)
+
+    folium.PolyLine(coords, color="red", weight=3, opacity=0.8).add_to(route_map)
+
+    st_data = st_folium(route_map, width=800, height=500)
 else:
-    print("ไม่พบเส้นทางที่เหมาะสม")
-
-# สร้างโมเดล
-manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)  # 1 รถ, เริ่มที่จุด 0
-routing = pywrapcp.RoutingModel(manager)
-
-def distance_callback(from_index, to_index):
-    return int(distance_matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)] * 100000)
-
-transit_callback_index = routing.RegisterTransitCallback(distance_callback)
-routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-
-# เพิ่ม constraint: ให้จบทริปที่จุดเริ่ม
-routing.AddDimension(
-    transit_callback_index,
-    0,  # no slack
-    10000000,  # maximum distance
-    True,  # start cumul to zero
-    "Distance"
-)
-
-# Solve!
-search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-search_parameters.first_solution_strategy = (
-    routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
-
-solution = routing.SolveWithParameters(search_parameters)
-
-# แสดงผล
-if solution:
-    index = routing.Start(0)
-    route = []
-    while not routing.IsEnd(index):
-        node = manager.IndexToNode(index)
-        route.append(location_order[node])
-        index = solution.Value(routing.NextVar(index))
-    route.append(location_order[manager.IndexToNode(index)])
-    print("เส้นทางที่ดีที่สุด:", " → ".join(route))
-else:
-    print("ไม่พบเส้นทางที่เหมาะสม")
+    st.error("ไม่พบเส้นทางที่เหมาะสม 😢")
