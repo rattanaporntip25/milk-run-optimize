@@ -1,87 +1,132 @@
 import streamlit as st
+import pandas as pd
 import numpy as np
 import folium
 from streamlit_folium import st_folium
-from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
 
 st.set_page_config(page_title="Milk Run Optimizer", layout="wide")
 st.title("Milk Run Optimizer")
-st.markdown("🚛 คำนวณเส้นทางขนส่งที่สั้นที่สุดด้วย Google OR-Tools")
+st.markdown("ระบบจัดลำดับเส้นทาง Milk Run ด้วย Google OR-Tools")
 
-# -----------------------------
-# ข้อมูลจุด (DIT และเวนเดอร์)
-# -----------------------------
-locations = {
-    "DIT": (13.4214, 101.0101),
-    "VND1": (13.5000, 100.9000),
-    "VND2": (13.6000, 101.2000),
-    "VND3": (13.4500, 100.8000),
-}
+# โหลดจาก Google Sheets
+@st.cache_data
+def load_sheet(sheet_gid, name):
+    url = f"https://docs.google.com/spreadsheets/d/1IQ2T_v2y9z3KCsZ6ul3qQtGBKgnx3s0OtwRaDIuuUSc/export?format=csv&gid={sheet_gid}"
+    try:
+        df = pd.read_csv(url)
+        st.success(f"✅ โหลด {name} สำเร็จ")
+        return df
+    except Exception as e:
+        st.error(f"❌ โหลด {name} ล้มเหลว: {e}")
+        return pd.DataFrame()
 
-# -----------------------------
-# สร้าง Distance Matrix
-# -----------------------------
+vendors = load_sheet(0, "Vendors")
+routes = load_sheet(498856514, "Routes")
+
+# แปลงพิกัดเป็น float
+vendors["lat"] = vendors["lat"].astype(float)
+vendors["lng"] = vendors["lng"].astype(float)
+
+# ✅ เพิ่ม DIT ลงใน vendors
+dit_row = pd.DataFrame([{
+    "Ab.": "DIT",
+    "lat": 13.4214134,
+    "lng": 101.0101508
+}])
+vendors = pd.concat([dit_row, vendors], ignore_index=True)
+
+# --- UI เลือกวันที่/รถ
+routes["date"] = pd.to_datetime(routes["date"])
+selected_date = st.date_input("เลือกวันที่", value=routes["date"].min())
+selected_vehicle = st.selectbox("เลือกรถ", sorted(routes["vehicle_id"].unique()))
+
+# --- กรองข้อมูลตามวันที่/รถ
+filtered = routes[
+    (routes["date"] == pd.to_datetime(selected_date)) &
+    (routes["vehicle_id"] == selected_vehicle)
+]
+
+if filtered.empty:
+    st.warning("ไม่มีข้อมูลในวัน/รถที่เลือก")
+    st.stop()
+
+# ✅ ดึงตัวย่อของ vendors ที่ต้องไปรับวันนี้
+vendor_list = ["DIT"] + list(filtered["Ab."].unique()) + ["DIT"]
+locations = {abbr: (vendors[vendors["Ab."] == abbr]["lat"].values[0],
+                    vendors[vendors["Ab."] == abbr]["lng"].values[0])
+             for abbr in vendor_list}
+
+# --- คำนวณระยะห่างแบบ Euclidean
 def compute_distance_matrix(loc_dict):
     keys = list(loc_dict.keys())
     size = len(keys)
     matrix = np.zeros((size, size))
     for i in range(size):
         for j in range(size):
-            if i != j:
-                lat1, lon1 = loc_dict[keys[i]]
-                lat2, lon2 = loc_dict[keys[j]]
-                matrix[i][j] = np.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2)
+            lat1, lng1 = loc_dict[keys[i]]
+            lat2, lng2 = loc_dict[keys[j]]
+            matrix[i][j] = np.sqrt((lat1 - lat2)**2 + (lng1 - lng2)**2)
     return matrix, keys
 
-distance_matrix, location_keys = compute_distance_matrix(locations)
+dist_matrix, keys = compute_distance_matrix(locations)
 
-# -----------------------------
-# ใช้ OR-Tools หาเส้นทาง
-# -----------------------------
-manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)
-routing = pywrapcp.RoutingModel(manager)
+# --- ใช้ OR-Tools วางเส้นทาง
+def solve_tsp(distance_matrix):
+    size = len(distance_matrix)
+    manager = pywrapcp.RoutingIndexManager(size, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
 
-def distance_callback(from_idx, to_idx):
-    from_node = manager.IndexToNode(from_idx)
-    to_node = manager.IndexToNode(to_idx)
-    return int(distance_matrix[from_node][to_node] * 100000)  # scale
+    def distance_callback(i, j):
+        return int(distance_matrix[i][j] * 100000)
 
-transit_index = routing.RegisterTransitCallback(distance_callback)
-routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-params = pywrapcp.DefaultRoutingSearchParameters()
-params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
 
-solution = routing.SolveWithParameters(params)
+    solution = routing.SolveWithParameters(search_parameters)
 
-# -----------------------------
-# แสดงผลลัพธ์บน Streamlit
-# -----------------------------
-if solution:
-    route_idx = routing.Start(0)
-    optimized_route = []
-    while not routing.IsEnd(route_idx):
-        node_index = manager.IndexToNode(route_idx)
-        optimized_route.append(location_keys[node_index])
-        route_idx = solution.Value(routing.NextVar(route_idx))
-    optimized_route.append(location_keys[manager.IndexToNode(route_idx)])
+    if not solution:
+        return None
 
-    st.success("✔️ เส้นทางที่สั้นที่สุด:")
-    st.write(" ➜ ".join(optimized_route))
+    route = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        route.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
+    route.append(manager.IndexToNode(index))
+    return route
 
-    # แสดงแผนที่
-    route_map = folium.Map(location=locations["DIT"], zoom_start=9)
-    coords = [locations[loc] for loc in optimized_route]
+route_indices = solve_tsp(dist_matrix)
 
-    for i, loc in enumerate(optimized_route):
-        lat, lng = locations[loc]
-        icon_color = "blue" if loc != "DIT" else "green"
-        popup = f"{i+1}. {loc}"
+# --- แสดงผล
+if route_indices:
+    st.subheader("🔁 ลำดับเส้นทางที่แนะนำ:")
+    optimized = [keys[i] for i in route_indices]
+    st.markdown(" ➡️ ".join(optimized))
+
+    # --- แผนที่
+    start_loc = locations[optimized[0]]
+    route_map = folium.Map(location=start_loc, zoom_start=10)
+
+    colors = ["blue", "green", "purple", "orange", "darkred"]
+
+    # ปักหมุดทุกจุด
+    for idx, abbr in enumerate(optimized):
+        lat, lng = locations[abbr]
+        popup = f"{abbr} ({idx+1})"
+        color = "red" if abbr == "DIT" else colors[idx % len(colors)]
         folium.Marker(location=(lat, lng), popup=popup,
-                      icon=folium.Icon(color=icon_color)).add_to(route_map)
+                      icon=folium.Icon(color=color)).add_to(route_map)
 
-    folium.PolyLine(coords, color="red", weight=3, opacity=0.8).add_to(route_map)
+    # วาดเส้น
+    latlngs = [locations[abbr] for abbr in optimized]
+    folium.PolyLine(latlngs, color="blue", weight=4, opacity=0.7).add_to(route_map)
 
-    st_data = st_folium(route_map, width=800, height=500)
+    st_folium(route_map, width=800, height=500)
 else:
-    st.error("ไม่พบเส้นทางที่เหมาะสม 😢")
+    st.error("❌ ไม่สามารถวางเส้นทางได้")
