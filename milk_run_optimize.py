@@ -21,7 +21,7 @@ def load_sheet(sheet_gid, name):
         st.success(f"✅ โหลดข้อมูล {name} สำเร็จ")
         return df
     except Exception as e:
-        st.error(f"❌ โหลดข้อมูล {name} ล้มเหลว: {e}")
+        st.error(f"❌ โหลดข้อมูล {name} ล้มเหว: {e}")
         return pd.DataFrame()
 
 # โหลดข้อมูล
@@ -58,27 +58,25 @@ if filtered.empty:
 # -------------------------------
 # เตรียม Distance Matrix (เลือกเฉพาะที่เกี่ยวข้อง)
 # -------------------------------
-# ดึงชื่อย่อที่ใช้ในรอบนี้
 used_abbr = filtered["Ab."].unique().tolist()
-
-# เพิ่มจุดเริ่มต้น DIT
 if "DIT" not in used_abbr:
     used_abbr.insert(0, "DIT")
 else:
     used_abbr.remove("DIT")
-    used_abbr.insert(0, "DIT")  # ย้ายไปไว้ต้น
+    used_abbr.insert(0, "DIT")
 
-# สร้าง distance_matrix แบบย่อย
 matrix = distance_matrix_df.set_index(distance_matrix_df.columns[0])
 matrix = matrix.loc[used_abbr, used_abbr]
-distance_matrix = matrix.to_numpy().astype(int).tolist()
+
+# แปลงค่าทศนิยม -> จำนวนเต็ม (หน่วย 0.1 กม.)
+distance_matrix = (matrix.to_numpy() * 10).round().astype(int).tolist()
 
 # -------------------------------
 # Google OR-Tools Optimizer
 # -------------------------------
 def solve_tsp(matrix):
     size = len(matrix)
-    manager = pywrapcp.RoutingIndexManager(size, 1, 0)  # depot = 0
+    manager = pywrapcp.RoutingIndexManager(size, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
     def distance_callback(from_idx, to_idx):
@@ -100,25 +98,34 @@ def solve_tsp(matrix):
         node = manager.IndexToNode(index)
         route.append(node)
         index = solution.Value(routing.NextVar(index))
-    route.append(manager.IndexToNode(index))  # กลับจุดเริ่มต้น
+    route.append(manager.IndexToNode(index))
     return route
 
 route_indices = solve_tsp(distance_matrix)
 optimized_order = [used_abbr[i] for i in route_indices]
 
 # -------------------------------
-# แสดงผลลำดับ
+# แสดงผลลำดับ + ระยะทางรวม
 # -------------------------------
-st.subheader("🧭 ลำดับเส้นทางที่เหมาะสม")
+st.subheader("🤭 ลำดับเส้นทางที่เหมาะสม")
 for i, abbr in enumerate(optimized_order):
     st.write(f"{i+1}. {abbr}")
+
+# ระยะทางรวม
+if len(route_indices) >= 2:
+    total_distance_units = 0
+    for i in range(len(route_indices) - 1):
+        from_idx = route_indices[i]
+        to_idx = route_indices[i + 1]
+        total_distance_units += distance_matrix[from_idx][to_idx]
+    total_distance_km = total_distance_units / 10
+    st.success(f"📏 ระยะทางรวม: {total_distance_km:.2f} กม.")
 
 # -------------------------------
 # แผนที่ Folium
 # -------------------------------
-st.subheader("🗺️ แผนที่เส้นทางที่ Optimized แล้ว")
+st.subheader("📽️ แผนที่ Optimized")
 
-# จุดเริ่มต้น
 start_point = vendor_coords.get("DIT", (13.7, 100.5))
 route_map = folium.Map(location=start_point, zoom_start=10)
 
@@ -137,7 +144,6 @@ for i, abbr in enumerate(optimized_order):
             icon=folium.Icon(color=icon_color)
         ).add_to(route_map)
 
-# วาดเส้น Polyline
 if len(coords) >= 2:
     folium.PolyLine(coords, color="blue", weight=3, opacity=0.8).add_to(route_map)
 
