@@ -7,7 +7,7 @@ from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
 st.set_page_config(page_title="Milk Run Optimizer", layout="wide")
-st.title("🫠 Milk Run Route Optimizer")
+st.title("🧠 Milk Run Route Optimizer")
 st.markdown("สร้างเส้นทางที่เหมาะสมจากข้อมูล Google Sheets")
 
 @st.cache_data
@@ -21,19 +21,24 @@ def load_sheet(sheet_gid, name):
         st.error(f"❌ โหลดข้อมูล {name} ล้มเหลว: {e}")
         return pd.DataFrame()
 
+# โหลดข้อมูล
 routes_df = load_sheet(498856514, "Routes")
 vendors_df = load_sheet(0, "Vendors")
 distance_df = load_sheet(703414661, "Distance Matrix")
 
+# ตรวจสอบคอลัมน์ date
 if "date" not in routes_df.columns:
     st.error("❌ ไม่พบคอลัมน์ 'date' ในชีท Routes")
     st.stop()
 
+# ดึงชื่อวันแบบ Mon, Tue
 routes_df["day_name"] = routes_df["date"].astype(str).str.strip().str[:3].str.capitalize()
 
+# UI เลือกวันและรถ
 selected_day = st.selectbox("เลือกวัน", sorted(routes_df["day_name"].unique()))
 selected_vehicle = st.selectbox("เลือกรถ", sorted(routes_df["vehicle_id"].unique()))
 
+# กรองตามวันและรถ
 filtered = routes_df[
     (routes_df["day_name"] == selected_day) &
     (routes_df["vehicle_id"] == selected_vehicle)
@@ -43,14 +48,18 @@ if filtered.empty:
     st.warning("ไม่พบข้อมูลสำหรับรถและวันดังกล่าว")
     st.stop()
 
-vendor_coords = {row["Ab."]: (row["lat"], row["lng"]) for _, row in vendors_df.iterrows()}
-vendor_coords["DIT"] = (13.4214134, 101.0101508)
+# ลิสต์จุดแวะ + เพิ่ม DIT หากยังไม่มี
+locations = filtered["Ab."].tolist()
+if "DIT" not in locations:
+    locations.insert(0, "DIT")
 
-colors = ["red", "blue", "green", "orange", "purple", "darkred", "cadetblue", "darkblue"]
-route_map = folium.Map(location=vendor_coords["DIT"], zoom_start=9)
+# เตรียม Distance Matrix
+distance_matrix = distance_df.set_index(distance_df.columns[0])
+distance_matrix = distance_matrix.loc[locations, locations].astype(float).values
 
-def solve_tsp(locations, dist_matrix):
-    size = len(locations)
+# ใช้ OR-Tools คำนวณเส้นทาง
+def solve_tsp(dist_matrix):
+    size = len(dist_matrix)
     manager = pywrapcp.RoutingIndexManager(size, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
@@ -78,51 +87,50 @@ def solve_tsp(locations, dist_matrix):
     else:
         return None
 
-total_km_all_trips = 0
+# เรียกใช้งาน OR-Tools
+route_indices = solve_tsp(distance_matrix)
+if not route_indices:
+    st.error("❌ ไม่สามารถคำนวณเส้นทางได้")
+    st.stop()
 
-for i, (trip_no, group) in enumerate(filtered.groupby("trip_no")):
-    st.subheader(f"📍 Trip {trip_no}: เส้นทางที่เหมาะสม")
-    trip_locs = group["Ab."].tolist()
-    non_dit = [x for x in trip_locs if x != "DIT"]
-    locations = ["DIT"] + non_dit
+optimized_route = [locations[i] for i in route_indices]
 
-    try:
-        dist_matrix = distance_df.set_index(distance_df.columns[0])
-        dist_matrix = dist_matrix.loc[locations, locations].astype(float).values
-    except:
-        st.warning(f"❌ ไม่สามารถโหลดระยะทาง trip {trip_no}")
-        continue
+# แสดงผลลัพธ์เป็นข้อความ
+st.subheader("📍 เส้นทางที่เหมาะสม")
+st.markdown(f"🚩 จุดเริ่มต้น: **{optimized_route[0]}** (DIT)")
 
-    route_indices = solve_tsp(locations, dist_matrix)
-    if not route_indices:
-        st.warning(f"❌ ไม่สามารถ optimize trip {trip_no}")
-        continue
+for i, stop in enumerate(optimized_route[1:], start=1):
+    st.write(f"{i}. {stop}")
 
-    optimized_route = [locations[i] for i in route_indices]
-    for j, stop in enumerate(optimized_route):
-        st.write(f"{j+1}. {stop}")
+# คำนวณระยะทางรวม
+total_km = 0
+for i in range(len(route_indices)-1):
+    from_idx = route_indices[i]
+    to_idx = route_indices[i+1]
+    total_km += distance_matrix[from_idx][to_idx]
 
-    total_km = 0
-    for j in range(len(route_indices)-1):
-        total_km += dist_matrix[route_indices[j]][route_indices[j+1]]
+st.success(f"🛣️ ระยะทางรวมทั้งหมด: **{total_km:.2f} กม.**")
 
-    total_km_all_trips += total_km
-    st.success(f"🛣️ ระยะทาง trip {trip_no}: **{total_km:.2f} กม.**")
+# แสดงแผนที่ Folium
+st.subheader("🗺️ แผนที่เส้นทาง")
 
-    coords = []
-    for k, abbr in enumerate(optimized_route):
-        coord = vendor_coords.get(abbr)
-        if coord:
-            coords.append(coord)
-            popup = f"Trip {trip_no} | {k+1}. {abbr}"
-            color = "black" if abbr == "DIT" else colors[i % len(colors)]
-            folium.Marker(location=coord, popup=popup,
-                          icon=folium.Icon(color=color)).add_to(route_map)
+vendor_coords = {row["Ab."]: (row["lat"], row["lng"]) for _, row in vendors_df.iterrows()}
+vendor_coords["DIT"] = (13.4214134, 101.0101508)  # พิกัดโรงงาน
 
-    if len(coords) >= 2:
-        folium.PolyLine(coords, color=colors[i % len(colors)], weight=3, opacity=0.8).add_to(route_map)
+first_point = optimized_route[0]
+route_map = folium.Map(location=vendor_coords.get(first_point, (13.7, 100.5)), zoom_start=10)
 
-st.header("🗺️ แผนที่รวมทุก Trip")
-st_folium(route_map, width=900, height=600)
+coords = []
+for i, abbr in enumerate(optimized_route):
+    coord = vendor_coords.get(abbr)
+    if coord:
+        coords.append(coord)
+        popup = f"{'START' if i == 0 else i}. {abbr}"
+        icon_color = "black" if abbr == "DIT" else "blue"
+        folium.Marker(location=coord, popup=popup,
+                      icon=folium.Icon(color=icon_color)).add_to(route_map)
 
-st.success(f"📏 ระยะทางรวมทั้งหมด: **{total_km_all_trips:.2f} กม.**")
+if len(coords) >= 2:
+    folium.PolyLine(coords, color="blue", weight=3, opacity=0.8).add_to(route_map)
+
+st_folium(route_map, width=800, height=500)
