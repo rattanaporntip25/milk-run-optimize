@@ -46,74 +46,83 @@ if filtered.empty:
 vendor_coords = {row["Ab."]: (row["lat"], row["lng"]) for _, row in vendors_df.iterrows()}
 vendor_coords["DIT"] = (13.4214134, 101.0101508)
 
-colors = ["red", "blue", "green", "orange", "purple", "darkred", "cadetblue", "darkgreen"]
-route_map = folium.Map(location=vendor_coords.get("DIT", (13.7, 100.5)), zoom_start=9)
+colors = ["red", "blue", "green", "orange", "purple", "darkred", "cadetblue", "darkblue"]
+route_map = folium.Map(location=vendor_coords["DIT"], zoom_start=9)
 
-trip_list = filtered["trip_no"].unique()
-for trip_idx, trip_no in enumerate(trip_list):
-    trip_df = filtered[filtered["trip_no"] == trip_no]
-    stops = trip_df["Ab."].tolist()
-    if "DIT" not in stops:
-        stops.insert(0, "DIT")
+def solve_tsp(locations, dist_matrix):
+    size = len(locations)
+    manager = pywrapcp.RoutingIndexManager(size, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
 
-    dist_matrix = distance_df.set_index(distance_df.columns[0])
-    dist_matrix = dist_matrix.loc[stops, stops].astype(float).values
+    def distance_callback(from_idx, to_idx):
+        from_node = manager.IndexToNode(from_idx)
+        to_node = manager.IndexToNode(to_idx)
+        return int(dist_matrix[from_node][to_node] * 1000)
 
-    def solve_tsp(dist_matrix):
-        size = len(dist_matrix)
-        manager = pywrapcp.RoutingIndexManager(size, 1, 0)
-        routing = pywrapcp.RoutingModel(manager)
+    transit_callback_idx = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_idx)
 
-        def distance_callback(from_idx, to_idx):
-            from_node = manager.IndexToNode(from_idx)
-            to_node = manager.IndexToNode(to_idx)
-            return int(dist_matrix[from_node][to_node] * 1000)
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
 
-        transit_callback_idx = routing.RegisterTransitCallback(distance_callback)
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_idx)
-
-        search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-        search_parameters.first_solution_strategy = (
-            routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC)
-
-        solution = routing.SolveWithParameters(search_parameters)
-        if solution:
-            index = routing.Start(0)
-            route = []
-            while not routing.IsEnd(index):
-                route.append(manager.IndexToNode(index))
-                index = solution.Value(routing.NextVar(index))
+    solution = routing.SolveWithParameters(search_parameters)
+    if solution:
+        index = routing.Start(0)
+        route = []
+        while not routing.IsEnd(index):
             route.append(manager.IndexToNode(index))
-            return route
-        else:
-            return None
+            index = solution.Value(routing.NextVar(index))
+        route.append(manager.IndexToNode(index))
+        return route
+    else:
+        return None
 
-    route_indices = solve_tsp(dist_matrix)
-    if not route_indices:
-        st.error(f"❌ ไม่สามารถคำนวณเส้นทางสำหรับ Trip {trip_no} ได้")
+total_km_all_trips = 0
+
+for i, (trip_no, group) in enumerate(filtered.groupby("trip_no")):
+    st.subheader(f"📍 Trip {trip_no}: เส้นทางที่เหมาะสม")
+    trip_locs = group["Ab."].tolist()
+    non_dit = [x for x in trip_locs if x != "DIT"]
+    locations = ["DIT"] + non_dit
+
+    try:
+        dist_matrix = distance_df.set_index(distance_df.columns[0])
+        dist_matrix = dist_matrix.loc[locations, locations].astype(float).values
+    except:
+        st.warning(f"❌ ไม่สามารถโหลดระยะทาง trip {trip_no}")
         continue
 
-    optimized_route = [stops[i] for i in route_indices]
-    st.subheader(f"📍 Trip {trip_no}: เส้นทางที่เหมาะสม")
-    for i, stop in enumerate(optimized_route):
-        st.write(f"{i+1}. {stop}")
+    route_indices = solve_tsp(locations, dist_matrix)
+    if not route_indices:
+        st.warning(f"❌ ไม่สามารถ optimize trip {trip_no}")
+        continue
 
-    total_km = sum(dist_matrix[route_indices[i]][route_indices[i+1]] for i in range(len(route_indices)-1))
-    st.success(f"🚐 Trip {trip_no} ระยะทางรวม: **{total_km:.2f} กม.**")
+    optimized_route = [locations[i] for i in route_indices]
+    for j, stop in enumerate(optimized_route):
+        st.write(f"{j+1}. {stop}")
+
+    total_km = 0
+    for j in range(len(route_indices)-1):
+        total_km += dist_matrix[route_indices[j]][route_indices[j+1]]
+
+    total_km_all_trips += total_km
+    st.success(f"🛣️ ระยะทาง trip {trip_no}: **{total_km:.2f} กม.**")
 
     coords = []
-    for i, abbr in enumerate(optimized_route):
+    for k, abbr in enumerate(optimized_route):
         coord = vendor_coords.get(abbr)
         if coord:
             coords.append(coord)
-            popup = f"Trip {trip_no}: {i+1}. {abbr}"
-            icon_color = "black" if abbr == "DIT" else colors[trip_idx % len(colors)]
+            popup = f"Trip {trip_no} | {k+1}. {abbr}"
+            color = "black" if abbr == "DIT" else colors[i % len(colors)]
             folium.Marker(location=coord, popup=popup,
-                          icon=folium.Icon(color=icon_color)).add_to(route_map)
+                          icon=folium.Icon(color=color)).add_to(route_map)
 
     if len(coords) >= 2:
-        folium.PolyLine(coords, color=colors[trip_idx % len(colors)],
-                        weight=3, opacity=0.8).add_to(route_map)
+        folium.PolyLine(coords, color=colors[i % len(colors)], weight=3, opacity=0.8).add_to(route_map)
 
-st.subheader("🗌️ แผนที่รวมทุก Trip")
-st_folium(route_map, width=800, height=500)
+st.header("🗺️ แผนที่รวมทุก Trip")
+st_folium(route_map, width=900, height=600)
+
+st.success(f"📏 ระยะทางรวมทั้งหมด: **{total_km_all_trips:.2f} กม.**")
