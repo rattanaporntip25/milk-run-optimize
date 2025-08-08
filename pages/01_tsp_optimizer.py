@@ -6,7 +6,7 @@ from streamlit_folium import st_folium
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
-st.set_page_config(page_title="Milk Run Optimizer", layout="wide")
+
 st.title("🫠 Milk Run Route Optimizer")
 st.markdown("สร้างเส้นทางที่เหมาะสมจากข้อมูล Google Sheets")
 
