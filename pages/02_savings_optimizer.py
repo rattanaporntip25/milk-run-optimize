@@ -10,7 +10,7 @@ from ortools.constraint_solver import pywrapcp
 # -------------------------
 # Page Setup
 # -------------------------
-st.set_page_config(page_title="Milk Run Optimizer", layout="wide")
+
 st.title("🧠 Milk Run Savings-based Optimizer")
 st.markdown("ใช้ข้อมูลจาก Google Sheets เพื่อคำนวณเส้นทางที่เหมาะสมที่สุด")
 
